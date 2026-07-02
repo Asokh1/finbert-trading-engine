@@ -1,0 +1,10 @@
+torch
+transformers
+datasets
+peft
+numpy
+pandas
+scikit-learn
+requests
+python-dotenv
+tqdm
