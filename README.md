@@ -73,7 +73,7 @@ To calculate the MACD sentiment momentum for a specific ticker over 7-day and 30
 ```bash
 python momentum.py
 ```
-*Outputs the short-term and long-term averages alongside the MACD momentum value and a calculated trend signal (e.g., SLIGHT UPTREND).*
+*Outputs the short-term and long-term averages alongside the MACD momentum value and a calculated trend signal.*
 
 ### Live Sentiment Analysis
 To analyze the current instantaneous sentiment for a specific equity:
