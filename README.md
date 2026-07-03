@@ -68,12 +68,19 @@ FINNHUB_API_KEY=your_api_key_here
 
 ## Usage Documentation
 
+### Momentum Analysis
+To calculate the MACD sentiment momentum for a specific ticker over 7-day and 30-day windows:
+```bash
+python momentum.py
+```
+*Outputs the short-term and long-term averages alongside the MACD momentum value and a calculated trend signal (e.g., SLIGHT UPTREND).*
+
 ### Live Sentiment Analysis
-To analyze the current sentiment momentum for a specific equity:
+To analyze the current instantaneous sentiment for a specific equity:
 ```bash
 python live_sentiment.py
 ```
-*Outputs the short-term versus long-term sentiment MACD and provides a directional technical signal.*
+*Outputs the raw negative/positive classification and probability scores based on the most recent news articles.*
 
 ### Strategy Backtesting
 To run the historical simulation and evaluate stop-loss efficiency and precision across multiple assets:
@@ -81,6 +88,3 @@ To run the historical simulation and evaluate stop-loss efficiency and precision
 python backtest.py
 ```
 *Outputs a detailed trade ledger, including entry and exit pricing, individual trade returns, aggregate win rate, and Cumulative PnL.*
-
----
-*Engineered by Aryan*
