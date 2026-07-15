@@ -39,7 +39,7 @@ The pipeline is entirely self-contained, prioritizing latency optimization and s
 
 **1. Clone the repository**
 ```bash
-git clone [https://github.com/YOUR_USERNAME/finbert-trading-engine.git](https://github.com/YOUR_USERNAME/finbert-trading-engine.git)
+git clone https://github.com/Asokh1/finbert-trading-engine.git
 cd finbert-trading-engine
 ```
 
@@ -89,4 +89,25 @@ To run the historical simulation across a portfolio of assets, applying the ATR-
 ```bash
 python backtest.py
 ```
-*Outputs a detailed trade ledger, including entry/exit pricing, position size, individual trade returns, and how each trade closed (stopped out, target hit, or time-based exit), followed by aggregate win rate and cost-adjusted Cumulative PnL.*
+*Outputs a detailed trade ledger, including entry/exit pricing, position size, individual trade returns, and how each trade closed (stopped out, target hit, or time-based exit), followed by aggregate win rate and cost-adjusted Cumulative PnL:*
+
+```
+DATE         SYM    SIGNAL                 PRICE IN   PRICE OUT  SIZE     RETURN
+=====================================================================================
+2026-01-04   AMZN   BEARISH (SHORT)        $233.06    $241.69    0.27   x  -3.91%  [STOPPED OUT]
+2026-03-01   AMZN   BULLISH (BUY)          $208.39    $213.49    0.18   x   2.24%
+2025-12-21   TSLA   BEARISH (SHORT)        $488.73    $459.64    0.14   x   5.76%
+2025-12-28   TSLA   BEARISH (SHORT)        $459.64    $451.67    0.13   x   1.54%
+2026-03-29   AAPL   BULLISH (BUY)          $246.40    $261.59    0.24   x   5.95%  [TARGET HIT]
+2026-04-05   AAPL   BULLISH (BUY)          $258.62    $248.01    0.24   x  -4.29%  [STOPPED OUT]
+2026-03-22   MSFT   BEARISH (SHORT)        $382.17    $360.88    0.27   x   5.38%  [TARGET HIT]
+2026-06-14   MSFT   BULLISH (BUY)          $399.76    $372.84    0.15   x  -6.92%  [STOPPED OUT]
+2026-01-04   GOOGL  BULLISH (BUY)          $316.13    $331.43    0.26   x   4.63%
+=====================================================================================
+Total Trades Taken:  18
+Winning Trades:      10
+Win Rate:            55.6%
+Cumulative PnL:      -0.23%
+```
+
+*Note: with a small number of trades per run, this output is meant to demonstrate the risk-management mechanics (ATR-adaptive stops/targets, volatility-scaled position sizing, cost-adjusted PnL) rather than serve as a claim of statistical profitability — the focus of this project is the engineering of the risk engine itself, not a curve-fit backtest result.*
