@@ -22,7 +22,9 @@ This project serves as a comprehensive demonstration of full-stack quantitative 
   $$MACD_{sentiment} = EMA_{short}(S) - EMA_{long}(S)$$
   
   This identifies genuine trend reversals and momentum breakouts by measuring the delta between the 7-day and 30-day sentiment averages, isolating acceleration rather than static positivity.
-* **Asymmetric Risk Controls:** The integrated custom backtester simulates realistic market conditions with a hardcoded 5% Stop-Loss. By strictly capping downside risk while allowing profitable trades to run across a defined holding period, the mathematical architecture is engineered to generate positive Cumulative PnL independently of a high win rate.
+* **Dynamic Volatility Risk Management:** Replaces static stop-loss assumptions with a volatility-adaptive framework built on the 14-day **Average True Range (ATR)**. Each position is bracketed by a stop-loss set at $2\times ATR_{14}$ below entry and a take-profit target at $3\times ATR_{14}$ above it, producing an asymmetric 1.5:1 reward-to-risk profile that automatically widens or tightens with the underlying asset's realized volatility.
+* **Volatility-Adjusted Position Sizing:** Capital allocated per trade is scaled inversely to each asset's ATR, so every position risks roughly the same fraction of capital if its stop is hit, regardless of how volatile the underlying instrument is (capped to prevent over-leveraging on unusually low-volatility names).
+* **Transaction Cost Modeling:** Applies realistic commission and slippage assumptions to both the entry and exit leg of every trade, so reported PnL reflects tradable, cost-adjusted returns rather than frictionless theoretical performance.
 
 ## System Architecture
 
@@ -83,8 +85,8 @@ python live_sentiment.py
 *Outputs the raw negative/positive classification and probability scores based on the most recent news articles.*
 
 ### Strategy Backtesting
-To run the historical simulation and evaluate stop-loss efficiency and precision across multiple assets:
+To run the historical simulation across a portfolio of assets, applying the ATR-based stop-loss/take-profit and volatility-adjusted position sizing:
 ```bash
 python backtest.py
 ```
-*Outputs a detailed trade ledger, including entry and exit pricing, individual trade returns, aggregate win rate, and Cumulative PnL.*
+*Outputs a detailed trade ledger, including entry/exit pricing, position size, individual trade returns, and how each trade closed (stopped out, target hit, or time-based exit), followed by aggregate win rate and cost-adjusted Cumulative PnL.*
