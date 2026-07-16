@@ -7,7 +7,11 @@ import yfinance as yf
 from dotenv import load_dotenv
 import os
 import math
+import statistics
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 load_dotenv()
 
@@ -86,6 +90,71 @@ def calculate_trade_return(price_in, price_out, is_bullish, cost_pct):
         effective_out = price_out * (1 + cost_pct)
         return (effective_in - effective_out) / effective_in
 
+def compute_performance_metrics(trade_records, start_date):
+    sorted_trades = sorted(trade_records, key=lambda t: t['date'])
+    weighted_returns = [t['weighted_return'] for t in sorted_trades]
+    dates = [start_date] + [t['date'] for t in sorted_trades]
+
+    # compounded equity curve, needed for max drawdown and the plot
+    equity_curve = [1.0]
+    for r in weighted_returns:
+        equity_curve.append(equity_curve[-1] * (1 + r))
+
+    peak = equity_curve[0]
+    max_drawdown = 0.0
+    for value in equity_curve:
+        peak = max(peak, value)
+        max_drawdown = min(max_drawdown, (value - peak) / peak)
+
+    n = len(weighted_returns)
+    mean_return = statistics.mean(weighted_returns)
+    std_return = statistics.pstdev(weighted_returns) if n > 1 else 0.0
+
+    # annualize using the trade frequency actually observed over the backtest window
+    span_days = max((dates[-1] - start_date).days, 1)
+    periods_per_year = n * 365 / span_days
+
+    sharpe = (mean_return / std_return) * math.sqrt(periods_per_year) if std_return > 0 else 0.0
+
+    downside_returns = [r for r in weighted_returns if r < 0]
+    downside_std = statistics.pstdev(downside_returns) if len(downside_returns) > 1 else 0.0
+    sortino = (mean_return / downside_std) * math.sqrt(periods_per_year) if downside_std > 0 else 0.0
+
+    return {
+        'dates': dates,
+        'equity_curve': equity_curve,
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'max_drawdown': max_drawdown,
+        'total_return': equity_curve[-1] - 1.0,
+    }
+
+
+def fetch_benchmark_equity(start_date, end_date, symbol='SPY'):
+    benchmark = yf.Ticker(symbol).history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+    if benchmark.empty:
+        return None, None
+    benchmark.index = benchmark.index.tz_localize(None)
+    equity = benchmark['Close'] / benchmark['Close'].iloc[0]
+    return benchmark.index, equity
+
+
+def plot_equity_curve(portfolio_dates, portfolio_equity, benchmark_dates, benchmark_equity, benchmark_symbol, output_path='equity_curve.png'):
+    plt.figure(figsize=(10, 6))
+    plt.step(portfolio_dates, portfolio_equity, where='post', label='Strategy', linewidth=2)
+    if benchmark_equity is not None:
+        plt.plot(benchmark_dates, benchmark_equity, label=f'{benchmark_symbol} Buy & Hold', linewidth=1.5, alpha=0.8)
+    plt.axhline(1.0, color='gray', linestyle='--', linewidth=0.8)
+    plt.title('Strategy Equity Curve vs Benchmark')
+    plt.xlabel('Date')
+    plt.ylabel('Growth of $1')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Equity curve saved to {output_path}")
+
+
 def run_backtest():
     print("Initializing Backtester with Dynamic ATR Stop-Loss...")
     model, tokenizer = load_model()
@@ -99,7 +168,7 @@ def run_backtest():
     
     total_trades = 0
     winning_trades = 0
-    portfolio_return = 0.0
+    trade_records = []
     ATR_MULTIPLIER = 2 # stop = 2x ATR
     TAKE_PROFIT_MULTIPLIER = 3 # target = 3x ATR, so we're risking 1 to make 1.5
     TRANSACTION_COST_PCT = 0.001 # ~10bps per leg for commission/slippage
@@ -220,10 +289,15 @@ def run_backtest():
                     price_out = float(holding_period_data.iloc[-1]['Close'])
                     trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
 
-                portfolio_return += trade_return * position_weight
                 total_trades += 1
                 if trade_return > 0:
                     winning_trades += 1
+
+                trade_records.append({
+                    'date': actual_entry_date,
+                    'symbol': symbol,
+                    'weighted_return': trade_return * position_weight,
+                })
 
                 # marker so we know how it closed
                 if stopped_out:
@@ -242,7 +316,20 @@ def run_backtest():
     print(f"Winning Trades:      {winning_trades}")
     if total_trades > 0:
         print(f"Win Rate:            {(winning_trades/total_trades)*100:.1f}%")
-        print(f"Cumulative PnL:      {portfolio_return*100:.2f}%")
+
+        metrics = compute_performance_metrics(trade_records, start_date)
+        print(f"Cumulative PnL:      {metrics['total_return']*100:.2f}%")
+        print(f"Sharpe Ratio:        {metrics['sharpe']:.2f}")
+        print(f"Sortino Ratio:       {metrics['sortino']:.2f}")
+        print(f"Max Drawdown:        {metrics['max_drawdown']*100:.2f}%")
+
+        benchmark_dates, benchmark_equity = fetch_benchmark_equity(start_date, end_date)
+        if benchmark_equity is not None:
+            benchmark_return = benchmark_equity.iloc[-1] - 1.0
+            print(f"Benchmark (SPY B&H): {benchmark_return*100:.2f}%")
+            print(f"Alpha vs Benchmark:  {(metrics['total_return'] - benchmark_return)*100:.2f}%")
+
+        plot_equity_curve(metrics['dates'], metrics['equity_curve'], benchmark_dates, benchmark_equity, 'SPY')
 
 if __name__ == '__main__':
     run_backtest()
