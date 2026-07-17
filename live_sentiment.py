@@ -18,7 +18,7 @@ device = torch.device('cpu')
 
 def load_model():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2, ignore_mismatched_sizes=True)
+    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=3)
     model = PeftModel.from_pretrained(model, MODEL_DIR)
     model = model.to(device)
     model.eval()
@@ -45,7 +45,9 @@ def predict_sentiment(text, model, tokenizer):
     with torch.no_grad():
         outputs = model(**inputs)
     probs = torch.softmax(outputs.logits, dim=1)[0].cpu().numpy()
-    label = 'POSITIVE' if probs[1] > probs[0] else 'NEGATIVE'
+    # FinBERT id2label: 0=positive, 1=negative, 2=neutral
+    labels = ['POSITIVE', 'NEGATIVE', 'NEUTRAL']
+    label = labels[probs.argmax()]
     confidence = max(probs)
     return label, confidence
 
@@ -74,7 +76,10 @@ def analyze_stocks():
             sentiments.append({'label': label, 'confidence': confidence})
         
         if sentiments:
-            avg_sentiment = 'POSITIVE' if sum(1 for s in sentiments if s['label']=='POSITIVE') > len(sentiments)/2 else 'NEGATIVE'
+            label_counts = {}
+            for s in sentiments:
+                label_counts[s['label']] = label_counts.get(s['label'], 0) + 1
+            avg_sentiment = max(label_counts, key=label_counts.get)
             avg_confidence = sum(s['confidence'] for s in sentiments) / len(sentiments)
             headline_preview = f"Based on avg of {len(sentiments)} recent articles"
 
@@ -90,9 +95,10 @@ def analyze_stocks():
     print(f"\nAnalysis complete at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     positive = sum(1 for r in results.values() if r['sentiment'] == 'POSITIVE')
-    negative = len(results) - positive
-    
-    print(f"Positive: {positive} | Negative: {negative}")
+    negative = sum(1 for r in results.values() if r['sentiment'] == 'NEGATIVE')
+    neutral = len(results) - positive - negative
+
+    print(f"Positive: {positive} | Negative: {negative} | Neutral: {neutral}")
 
 if __name__ == '__main__':
     analyze_stocks()

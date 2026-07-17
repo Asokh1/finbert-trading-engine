@@ -27,7 +27,9 @@ def preprocess_function(examples, tokenizer):
 def train_finbert():
     print("Loading FinBERT model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2, ignore_mismatched_sizes=True)
+    # num_labels=3 matches FinBERT's native positive/negative/neutral head, so LoRA
+    # fine-tunes the pretrained classifier instead of training a random one from scratch.
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)
     
     print("Configuring LoRA...")
     lora_config = LoraConfig(

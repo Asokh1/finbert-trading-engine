@@ -18,7 +18,7 @@ device = torch.device('cpu')
 
 def load_model():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2, ignore_mismatched_sizes=True)
+    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=3)
     model = PeftModel.from_pretrained(model, MODEL_DIR)
     model = model.to(device)
     model.eval()
@@ -41,7 +41,8 @@ def predict_positivity(text, model, tokenizer):
     with torch.no_grad():
         outputs = model(**inputs)
     probs = torch.softmax(outputs.logits, dim=1)[0].cpu().numpy()
-    return probs[1]
+    # FinBERT id2label: 0=positive, 1=negative, 2=neutral
+    return float(probs[0] + 0.5 * probs[2])
 
 def calculate_time_decayed_score(articles, model, tokenizer, half_life_days):
     if not articles:

@@ -23,7 +23,7 @@ device = torch.device('cpu')
 
 def load_model():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2, ignore_mismatched_sizes=True)
+    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=3)
     model = PeftModel.from_pretrained(model, MODEL_DIR)
     model = model.to(device)
     model.eval()
@@ -34,7 +34,9 @@ def predict_positivity(text, model, tokenizer):
     with torch.no_grad():
         outputs = model(**inputs)
     probs = torch.softmax(outputs.logits, dim=1)[0].cpu().numpy()
-    return probs[1]
+    # FinBERT id2label: 0=positive, 1=negative, 2=neutral. Split neutral mass evenly so
+    # a neutral headline pulls the score toward 0.5 instead of being ignored outright.
+    return float(probs[0] + 0.5 * probs[2])
 
 def score_articles(articles, model, tokenizer):
     return [predict_positivity(article.get('headline', ''), model, tokenizer) for article in articles]
@@ -156,9 +158,11 @@ def run_backtest():
     print("Initializing Backtester with Dynamic ATR Stop-Loss...")
     model, tokenizer = load_model()
     
-    # Test signals from 210 days ago up to 10 days ago
+    # Finnhub's free tier only serves company news for roughly the trailing year, so
+    # 355 days is close to the max history we can pull without silently getting empty
+    # results near the boundary.
     end_date = datetime.now() - timedelta(days=10)
-    start_date = end_date - timedelta(days=200)
+    start_date = end_date - timedelta(days=355)
     
     # Generate weekly test dates
     test_dates = pd.date_range(start=start_date, end=end_date, freq='W')
@@ -216,8 +220,11 @@ def run_backtest():
             momentum = short_term - long_term
             
             # 4. Define our Signal Strategy
-            is_bullish = momentum > 0.02
-            is_bearish = momentum < -0.02
+            # Threshold picked from the empirical momentum distribution (std ~0.007
+            # under the 3-class model) to land near the ~11% signal rate the strategy
+            # was tuned around, rather than the old 0.02 cutoff which only caught ~2%.
+            is_bullish = momentum > 0.01
+            is_bearish = momentum < -0.01
             
             if not is_bullish and not is_bearish:
                 continue # Skip if no strong signal
