@@ -7,7 +7,6 @@ import yfinance as yf
 from dotenv import load_dotenv
 import os
 import math
-import statistics
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
@@ -90,43 +89,41 @@ def calculate_trade_return(price_in, price_out, is_bullish, cost_pct):
         effective_out = price_out * (1 + cost_pct)
         return (effective_in - effective_out) / effective_in
 
-def compute_performance_metrics(trade_records, start_date):
-    sorted_trades = sorted(trade_records, key=lambda t: t['date'])
-    weighted_returns = [t['weighted_return'] for t in sorted_trades]
-    dates = [start_date] + [t['date'] for t in sorted_trades]
+def compute_performance_metrics(trade_records, start_date, end_date):
+    # daily, portfolio-level mark-to-market: trades held over the same days must
+    # add up on those days, not queue up one-after-another regardless of overlap.
+    # each trade's total weighted_return is spread evenly across the business days
+    # it was actually open, then every trade open on a given day contributes to
+    # that day's portfolio return.
+    calendar = pd.bdate_range(start=start_date, end=end_date)
+    daily_returns = pd.Series(0.0, index=calendar)
 
-    # compounded equity curve, needed for max drawdown and the plot
-    equity_curve = [1.0]
-    for r in weighted_returns:
-        equity_curve.append(equity_curve[-1] * (1 + r))
+    for t in trade_records:
+        held_days = calendar[(calendar > t['entry_date']) & (calendar <= t['exit_date'])]
+        if len(held_days) == 0:
+            continue
+        daily_returns.loc[held_days] += t['weighted_return'] / len(held_days)
 
-    peak = equity_curve[0]
-    max_drawdown = 0.0
-    for value in equity_curve:
-        peak = max(peak, value)
-        max_drawdown = min(max_drawdown, (value - peak) / peak)
+    equity_curve = (1 + daily_returns).cumprod()
+    running_peak = equity_curve.cummax()
+    max_drawdown = ((equity_curve - running_peak) / running_peak).min()
 
-    n = len(weighted_returns)
-    mean_return = statistics.mean(weighted_returns)
-    std_return = statistics.pstdev(weighted_returns) if n > 1 else 0.0
+    mean_return = daily_returns.mean()
+    std_return = daily_returns.std(ddof=0)
+    TRADING_DAYS_PER_YEAR = 252
+    sharpe = (mean_return / std_return) * math.sqrt(TRADING_DAYS_PER_YEAR) if std_return > 0 else 0.0
 
-    # annualize using the trade frequency actually observed over the backtest window
-    span_days = max((dates[-1] - start_date).days, 1)
-    periods_per_year = n * 365 / span_days
-
-    sharpe = (mean_return / std_return) * math.sqrt(periods_per_year) if std_return > 0 else 0.0
-
-    downside_returns = [r for r in weighted_returns if r < 0]
-    downside_std = statistics.pstdev(downside_returns) if len(downside_returns) > 1 else 0.0
-    sortino = (mean_return / downside_std) * math.sqrt(periods_per_year) if downside_std > 0 else 0.0
+    downside_returns = daily_returns[daily_returns < 0]
+    downside_std = downside_returns.std(ddof=0) if len(downside_returns) > 1 else 0.0
+    sortino = (mean_return / downside_std) * math.sqrt(TRADING_DAYS_PER_YEAR) if downside_std > 0 else 0.0
 
     return {
-        'dates': dates,
-        'equity_curve': equity_curve,
+        'dates': equity_curve.index,
+        'equity_curve': equity_curve.values,
         'sharpe': sharpe,
         'sortino': sortino,
         'max_drawdown': max_drawdown,
-        'total_return': equity_curve[-1] - 1.0,
+        'total_return': equity_curve.iloc[-1] - 1.0,
     }
 
 
@@ -141,7 +138,7 @@ def fetch_benchmark_equity(start_date, end_date, symbol='SPY'):
 
 def plot_equity_curve(portfolio_dates, portfolio_equity, benchmark_dates, benchmark_equity, benchmark_symbol, output_path='equity_curve.png'):
     plt.figure(figsize=(10, 6))
-    plt.step(portfolio_dates, portfolio_equity, where='post', label='Strategy', linewidth=2)
+    plt.plot(portfolio_dates, portfolio_equity, label='Strategy', linewidth=2)
     if benchmark_equity is not None:
         plt.plot(benchmark_dates, benchmark_equity, label=f'{benchmark_symbol} Buy & Hold', linewidth=1.5, alpha=0.8)
     plt.axhline(1.0, color='gray', linestyle='--', linewidth=0.8)
@@ -250,13 +247,14 @@ def run_backtest():
                 position_weight = min(RISK_PER_TRADE_PCT / stop_distance_pct, MAX_POSITION_WEIGHT)
 
                 # Get the next 7 days of price data
-                exit_date = actual_entry_date + timedelta(days=7)
-                holding_period_data = stock_data.loc[actual_entry_date + timedelta(days=1) : exit_date]
+                window_end_date = actual_entry_date + timedelta(days=7)
+                holding_period_data = stock_data.loc[actual_entry_date + timedelta(days=1) : window_end_date]
 
                 trade_return = 0.0
                 price_out = price_in
                 stopped_out = False
                 hit_target = False
+                trade_exit_date = actual_entry_date
 
                 # Check price day by day
                 for current_date, row in holding_period_data.iterrows():
@@ -265,11 +263,13 @@ def run_backtest():
                         price_out = stop_loss_price
                         trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
                         stopped_out = True
+                        trade_exit_date = current_date
                         break # Exit the trade instantly!
                     elif is_bearish and row['High'] > stop_loss_price:
                         price_out = stop_loss_price
                         trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
                         stopped_out = True
+                        trade_exit_date = current_date
                         break # Exit the trade instantly!
 
                     # then check if we hit the target
@@ -277,24 +277,28 @@ def run_backtest():
                         price_out = take_profit_price
                         trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
                         hit_target = True
+                        trade_exit_date = current_date
                         break
                     elif is_bearish and row['Low'] < take_profit_price:
                         price_out = take_profit_price
                         trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
                         hit_target = True
+                        trade_exit_date = current_date
                         break
 
                 # survived the week without hitting either level, close normally
                 if not stopped_out and not hit_target and not holding_period_data.empty:
                     price_out = float(holding_period_data.iloc[-1]['Close'])
                     trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
+                    trade_exit_date = holding_period_data.index[-1]
 
                 total_trades += 1
                 if trade_return > 0:
                     winning_trades += 1
 
                 trade_records.append({
-                    'date': actual_entry_date,
+                    'entry_date': actual_entry_date,
+                    'exit_date': trade_exit_date,
                     'symbol': symbol,
                     'weighted_return': trade_return * position_weight,
                 })
@@ -317,7 +321,7 @@ def run_backtest():
     if total_trades > 0:
         print(f"Win Rate:            {(winning_trades/total_trades)*100:.1f}%")
 
-        metrics = compute_performance_metrics(trade_records, start_date)
+        metrics = compute_performance_metrics(trade_records, start_date, end_date)
         print(f"Cumulative PnL:      {metrics['total_return']*100:.2f}%")
         print(f"Sharpe Ratio:        {metrics['sharpe']:.2f}")
         print(f"Sortino Ratio:       {metrics['sortino']:.2f}")
