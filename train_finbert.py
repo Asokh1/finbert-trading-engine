@@ -1,11 +1,16 @@
 import torch
 import json
+import os
+import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
 from datasets import Dataset
 from peft import get_peft_model, LoraConfig, TaskType
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 
 MODEL_NAME = 'ProsusAI/finbert'
 OUTPUT_DIR = 'models/finbert_renewable'
+# FinBERT id2label order, used to label the confusion matrix
+LABELS = ['positive', 'negative', 'neutral']
 
 def load_data():
     with open('data/train.json') as f:
@@ -23,6 +28,20 @@ def load_data():
 
 def preprocess_function(examples, tokenizer):
     return tokenizer(examples['text'], padding='max_length', truncation=True, max_length=128)
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=1)
+    per_class_f1 = f1_score(labels, predictions, average=None, labels=[0, 1, 2])
+    cm = confusion_matrix(labels, predictions, labels=[0, 1, 2])
+    print(f"\nConfusion matrix (rows=true, cols=predicted), labels={LABELS}:\n{cm}")
+    return {
+        'accuracy': accuracy_score(labels, predictions),
+        'f1_macro': f1_score(labels, predictions, average='macro'),
+        'f1_positive': per_class_f1[0],
+        'f1_negative': per_class_f1[1],
+        'f1_neutral': per_class_f1[2],
+    }
 
 def train_finbert():
     print("Loading FinBERT model...")
@@ -67,17 +86,20 @@ def train_finbert():
         eval_strategy='epoch',
         save_strategy='epoch',
         load_best_model_at_end=True,
+        metric_for_best_model='f1_macro',
     )
-    
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
+        compute_metrics=compute_metrics,
     )
     
     print("Starting training...")
-    trainer.train()
+    resume_checkpoint = os.environ.get('RESUME_FROM_CHECKPOINT')
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
     
     print(f"Model saved to {OUTPUT_DIR}")
     model.save_pretrained(OUTPUT_DIR)

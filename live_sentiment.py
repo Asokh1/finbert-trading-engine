@@ -1,10 +1,10 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import PeftModel
-import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+from api_utils import fetch_json
 
 load_dotenv()
 
@@ -30,15 +30,7 @@ def get_stock_news(symbol):
     last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
 
     url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from={last_week}&to={today}&token={FINNHUB_API}'
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json()
-        else:
-            print(f"API Error for {symbol}: {r.status_code}") # Helpful if you hit rate limits
-    except:
-        pass
-    return []
+    return fetch_json(url, symbol)
 
 def predict_sentiment(text, model, tokenizer):
     inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=128).to(device)

@@ -1,7 +1,6 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import PeftModel
-import requests
 from datetime import datetime, timedelta
 import yfinance as yf
 from dotenv import load_dotenv
@@ -11,6 +10,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from api_utils import fetch_json
 
 load_dotenv()
 
@@ -20,6 +20,10 @@ FINNHUB_API = os.getenv('FINNHUB_API_KEY')
 
 STOCKS = ['AMZN', 'TSLA', 'AAPL', 'MSFT', 'GOOGL']
 device = torch.device('cpu')
+
+def fetch_finnhub_news(symbol, from_date, to_date):
+    url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from={from_date}&to={to_date}&token={FINNHUB_API}'
+    return fetch_json(url, f"{symbol} on {to_date}")
 
 def load_model():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
@@ -196,13 +200,7 @@ def run_backtest():
             # 2. Fetch news specifically for the 30 days prior to THIS test date
             to_date = target_date.strftime('%Y-%m-%d')
             from_date = (target_date - timedelta(days=30)).strftime('%Y-%m-%d')
-            url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from={from_date}&to={to_date}&token={FINNHUB_API}'
-            
-            try:
-                r = requests.get(url, timeout=5)
-                news = r.json() if r.status_code == 200 else []
-            except:
-                news = []
+            news = fetch_finnhub_news(symbol, from_date, to_date)
                 
             if not news:
                 continue
@@ -320,7 +318,7 @@ def run_backtest():
                 print(f"{target_date.strftime('%Y-%m-%d'):<12} {symbol:<6} {signal_text:<22} ${price_in:<9.2f} ${price_out:<9.2f} {position_weight:<7.2f}x {trade_return*100:>6.2f}%  {status_marker}")
                 
             except Exception as e:
-                pass # Skip if market was closed or prices missing
+                print(f"Skipping {symbol} on {target_date.strftime('%Y-%m-%d')}: {e}")
 
     print("=" * 85)
     print(f"Total Trades Taken:  {total_trades}")

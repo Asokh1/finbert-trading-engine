@@ -5,97 +5,109 @@
 ![Transformers](https://img.shields.io/badge/HuggingFace-Transformers-F9AB00)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A high-performance algorithmic trading engine designed to execute sentiment-driven strategies utilizing Natural Language Processing (NLP). This system leverages a custom-tuned FinBERT Transformer model to parse financial news, calculate time-decayed sentiment momentum, and systematically backtest strategies with automated risk controls.
+Scores financial news headlines with a fine-tuned FinBERT model, turns that into a sentiment-momentum signal, and backtests it as a trading strategy with ATR-based stops, volatility-scaled position sizing, and transaction costs. Runs entirely on CPU, no cloud inference involved.
 
-## Technology Stack and Machine Learning Models
+## Stack
 
-This project serves as a comprehensive demonstration of full-stack quantitative engineering, featuring hands-on implementation of the following technologies:
+- **Model:** `ProsusAI/finbert`, a BERT variant pretrained on financial text (10-Ks, news), fine-tuned further with **LoRA**. The adapter trains on top of FinBERT's existing positive/negative/neutral head instead of swapping in a fresh binary head, so the ~0.3% of parameters it updates build on the existing financial-sentiment pretraining rather than discarding it.
+- **Data:** headlines from the **Finnhub** API, price history from `yfinance`. All API calls go through a shared retry layer (`api_utils.py`) with backoff and a floor delay between requests — the free tier throttles hard enough under back-to-back calls that a naive script quietly loses a large chunk of its requests to timeouts.
+- **Everything else:** PyTorch/Transformers for inference, Pandas for the time-series work.
 
-* **Deep Learning and NLP Core:** Utilizes the **Hugging Face Transformers** library and **PyTorch** to run local edge inference. The core model is `ProsusAI/finbert`, a specialized BERT architecture pre-trained extensively on financial corpora (10-K reports, financial news) to accurately contextualize market-specific jargon.
-* **Parameter-Efficient Fine-Tuning (PEFT):** Implements **LoRA (Low-Rank Adaptation)** to apply custom-trained weights over the base FinBERT model. Fine-tuning targets FinBERT's native positive/negative/neutral classification head directly, rather than discarding it in favor of a randomly-initialized binary head, so the ~0.3% of parameters LoRA updates build on top of FinBERT's existing financial-sentiment pretraining instead of replacing it. This demonstrates the ability to adapt massive language models dynamically at runtime, optimizing for CPU-efficient local execution without cloud dependency.
-* **Data Engineering:** Manages live data ingestion and rate-limiting utilizing the **Finnhub API** for unstructured news scraping and `yfinance` for historical market data. Employs **Pandas** for rigorous time-series alignment and vector-based financial calculations.
+## Strategy
 
-## Quantitative Strategy and Risk Management
+- **Sentiment momentum:** each headline gets classified positive/negative/neutral, then folded into a single positivity score (neutral mass is split toward 0.5 so a neutral headline doesn't read as bullish or bearish). The signal is a MACD applied to that score — the delta between a 3-day and 14-day half-life EWMA:
 
-* **Mathematical Sentiment Momentum:** Each headline is classified positive/negative/neutral, then combined into a single positivity score that blends neutral probability mass toward a 0.5 baseline so an unopinionated headline isn't miscounted as a directional signal. The engine then applies a Moving Average Convergence Divergence (MACD) approach to this sentiment score ($S$):
-  
   $$MACD_{sentiment} = EMA_{short}(S) - EMA_{long}(S)$$
-  
-  This identifies genuine trend reversals and momentum breakouts by measuring the delta between 3-day and 14-day half-life EWMA sentiment averages, isolating acceleration rather than static positivity.
-* **Dynamic Volatility Risk Management:** Replaces static stop-loss assumptions with a volatility-adaptive framework built on the 14-day **Average True Range (ATR)**. Each position is bracketed by a stop-loss set at $2\times ATR_{14}$ below entry and a take-profit target at $3\times ATR_{14}$ above it, producing an asymmetric 1.5:1 reward-to-risk profile that automatically widens or tightens with the underlying asset's realized volatility.
-* **Volatility-Adjusted Position Sizing:** Capital allocated per trade is scaled inversely to each asset's ATR, so every position risks roughly the same fraction of capital if its stop is hit, regardless of how volatile the underlying instrument is (capped to prevent over-leveraging on unusually low-volatility names).
-* **Transaction Cost Modeling:** Applies realistic commission and slippage assumptions to both the entry and exit leg of every trade, so reported PnL reflects tradable, cost-adjusted returns rather than frictionless theoretical performance.
-* **Risk-Adjusted Performance Evaluation:** Beyond raw PnL, the backtester marks the portfolio to market on every business day: each trade's return is spread across the business days it was actually held, and multiple trades open on the same day (across different stocks, or opposing signals on the same stock) are summed rather than queued up sequentially as if only one position could ever be open at a time. This daily series is compounded into an equity curve and used to report **Sharpe Ratio**, **Sortino Ratio** (downside-only volatility), and **Maximum Drawdown**, annualized off the standard 252 trading-day convention rather than raw trade count. Results are benchmarked against a **SPY buy-and-hold** equity curve over the identical period to report alpha, rather than presenting the strategy's return in isolation.
 
-## System Architecture
+  That picks out acceleration and reversals instead of just "is sentiment positive right now."
+- **Stops and targets:** a 14-day ATR sets the stop at 2x ATR and the target at 3x ATR (1.5:1 reward-to-risk), so both scale with how volatile the stock actually is instead of using a fixed dollar or percent stop.
+- **Position sizing:** scaled inversely to ATR so every trade risks roughly the same fraction of capital regardless of how volatile the underlying is, capped so a tight stop can't push leverage too high.
+- **Costs:** commission and slippage applied on both legs of every trade, so the PnL numbers are cost-adjusted rather than theoretical.
+- **Performance reporting:** the backtest marks the portfolio to market daily — each trade's return spread across the days it was held, overlapping trades summed instead of treated as sequential — then reports Sharpe, Sortino, and max drawdown off that daily equity curve (252-day annualization), benchmarked against SPY buy-and-hold for alpha.
 
-The pipeline is entirely self-contained, prioritizing latency optimization and security by keeping model inference and trading logic on local hardware.
+## Model training and evaluation
 
-1. **Ingestion:** Fetches chronological market data and news headlines.
-2. **Inference:** Loads LoRA weights into FinBERT to classify sentiment polarity and magnitude.
-3. **Signal Generation:** Applies the MACD decay function to output Bullish, Bearish, or Neutral signals based on momentum thresholds.
-4. **Execution Simulation:** Parses signals through the risk engine to log entries, exits, and capital fluctuations.
-5. **Performance Evaluation:** Aggregates trade-level returns into a compounded equity curve, computes Sharpe/Sortino/Max Drawdown, and plots the result against a SPY buy-and-hold benchmark.
+`train_finbert.py` fine-tunes the FinBERT head with LoRA on an 80/20 split and reports accuracy, macro-F1, per-class F1, and a confusion matrix each epoch instead of just tracking loss, and picks the best checkpoint by macro-F1. A recent run:
 
-## Installation and Setup
+- **Accuracy: 83.6%, macro-F1: 0.78**
+- Per-class F1 — positive 0.75, negative 0.69, neutral 0.89
+- Confusion matrix (rows = true label, cols = predicted; order positive/negative/neutral):
+  ```
+  [ 288   22   81]   true positive  (recall 73.7%)
+  [  28  197   60]   true negative  (recall 69.1%)
+  [  57   65 1111]   true neutral   (recall 90.1%)
+  ```
 
-**1. Clone the repository**
+Neutral makes up about 65% of the test set, so raw accuracy overstates how good the model is — macro-F1 is the fairer number. Negative is the weakest class and gets confused with neutral most often.
+
+One caveat worth flagging: this eval runs on held-out **Twitter** financial-sentiment data (`zeroshot/twitter-financial-news-sentiment`), the same distribution the model trains on. The live pipeline scores **news headlines**, which read differently than tweets in length and phrasing. So 83.6% here doesn't guarantee the same accuracy on the actual inference input — checking that against a small hand-labeled sample of real Finnhub headlines is the obvious next step.
+
+## How it fits together
+
+1. Pull price history and news headlines for the backtest window.
+2. Score each headline with the fine-tuned FinBERT model.
+3. Turn the sentiment series into a momentum signal and threshold it into bullish/bearish/neutral.
+4. Simulate entries and exits against the ATR stop/target logic, tracking size and cost.
+5. Roll trade-level returns into a daily equity curve and compute Sharpe/Sortino/drawdown against SPY.
+
+## Setup
+
+**1. Clone the repo**
 ```bash
 git clone https://github.com/Asokh1/finbert-trading-engine.git
 cd finbert-trading-engine
 ```
 
-**2. Initialize the Virtual Environment**
+**2. Set up a virtual environment**
 ```bash
 python -m venv .venv
 ```
-*Windows Authorization and Activation:*
+Windows:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 .\.venv\Scripts\Activate.ps1
 ```
-*macOS/Linux Activation:*
+macOS/Linux:
 ```bash
 source .venv/bin/activate
 ```
 
-**3. Install Dependencies**
+**3. Install dependencies**
 ```bash
 pip install -r requirements.txt
 ```
 
-**4. Environment Configuration**
-Create a `.env` file in the root directory and configure your Finnhub API key:
+**4. Add your API key**
+
+Create a `.env` file in the repo root:
 ```env
 FINNHUB_API_KEY=your_api_key_here
 ```
 
-## Usage Documentation
+## Usage
 
-### Momentum Analysis
-To calculate the MACD sentiment momentum for a specific ticker over 3-day and 14-day half-life EWMA windows:
+### Momentum check
 ```bash
 python momentum.py
 ```
-*Outputs the short-term and long-term averages alongside the MACD momentum value and a calculated trend signal.*
+Prints the short-term and long-term EWMA sentiment averages, the MACD momentum value, and a signal label for a ticker.
 
-### Live Sentiment Analysis
-To analyze the current instantaneous sentiment for a specific equity:
+### Live sentiment
 ```bash
 python live_sentiment.py
 ```
-*Outputs the raw negative/positive classification and probability scores based on the most recent news articles.*
+Prints the current positive/negative/neutral read on a ticker's most recent headlines, with confidence.
 
-### Strategy Backtesting
-To run the historical simulation across a portfolio of assets, applying the ATR-based stop-loss/take-profit and volatility-adjusted position sizing:
+### Backtest
 ```bash
 python backtest.py
 ```
-*Outputs a detailed trade ledger, including entry/exit pricing, position size, individual trade returns, and how each trade closed (stopped out, target hit, or time-based exit), followed by aggregate win rate, cost-adjusted Cumulative PnL, and risk-adjusted performance metrics benchmarked against SPY buy-and-hold:*
+Prints a full trade ledger — entries, exits, size, return, how each trade closed — followed by win rate, cumulative PnL, Sharpe/Sortino/drawdown, and the SPY comparison:
 
 ```
 DATE         SYM    SIGNAL                 PRICE IN   PRICE OUT  SIZE     RETURN
 =====================================================================================
+2025-08-17   AMZN   BULLISH (BUY)          $231.49    $227.94    0.19   x  -1.73%
 2025-09-14   AMZN   BULLISH (BUY)          $231.43    $227.63    0.24   x  -1.84%
 2025-10-12   AMZN   BEARISH (SHORT)        $220.07    $216.48    0.22   x   1.43%
 2025-10-26   AMZN   BEARISH (SHORT)        $226.97    $238.18    0.20   x  -5.15%  [STOPPED OUT]
@@ -103,11 +115,7 @@ DATE         SYM    SIGNAL                 PRICE IN   PRICE OUT  SIZE     RETURN
 2025-11-09   AMZN   BEARISH (SHORT)        $248.40    $232.87    0.15   x   6.06%
 2025-11-30   AMZN   BULLISH (BUY)          $233.88    $226.89    0.19   x  -3.18%
 2025-12-14   AMZN   BULLISH (BUY)          $222.54    $228.43    0.25   x   2.44%
-2026-03-15   AMZN   BULLISH (BUY)          $211.74    $210.14    0.19   x  -0.95%
 2026-06-28   AMZN   BEARISH (SHORT)        $240.14    $244.16    0.13   x  -1.88%
-2026-07-05   AMZN   BULLISH (BUY)          $244.16    $247.31    0.14   x   1.09%
-2025-08-03   TSLA   BEARISH (SHORT)        $309.26    $335.88    0.12   x  -8.83%  [STOPPED OUT]
-2025-08-10   TSLA   BULLISH (BUY)          $339.03    $335.16    0.13   x  -1.34%
 2025-08-31   TSLA   BEARISH (SHORT)        $329.36    $352.73    0.14   x  -7.31%  [STOPPED OUT]
 2025-09-07   TSLA   BULLISH (BUY)          $346.40    $384.32    0.14   x  10.72%  [TARGET HIT]
 2025-09-14   TSLA   BULLISH (BUY)          $410.04    $434.21    0.14   x   5.68%
@@ -117,47 +125,46 @@ DATE         SYM    SIGNAL                 PRICE IN   PRICE OUT  SIZE     RETURN
 2025-12-14   TSLA   BULLISH (BUY)          $475.31    $488.73    0.17   x   2.62%
 2025-12-21   TSLA   BEARISH (SHORT)        $488.73    $459.64    0.14   x   5.76%
 2026-01-04   TSLA   BEARISH (SHORT)        $451.67    $448.96    0.13   x   0.40%
+2026-04-12   TSLA   BEARISH (SHORT)        $352.42    $381.91    0.12   x  -8.58%  [STOPPED OUT]
 2026-05-17   TSLA   BEARISH (SHORT)        $409.99    $426.01    0.12   x  -4.12%
-2025-08-10   AAPL   BULLISH (BUY)          $226.54    $230.24    0.20   x   1.43%
+2026-05-24   TSLA   BULLISH (BUY)          $433.59    $423.74    0.12   x  -2.47%
 2025-09-14   AAPL   BEARISH (SHORT)        $236.03    $245.27    0.26   x  -4.12%  [STOPPED OUT]
-2025-10-05   AAPL   BEARISH (SHORT)        $255.97    $246.96    0.27   x   3.32%
 2025-10-19   AAPL   BULLISH (BUY)          $261.50    $268.05    0.25   x   2.30%
-2025-11-02   AAPL   BULLISH (BUY)          $268.29    $268.93    0.25   x   0.04%
 2025-11-09   AAPL   BEARISH (SHORT)        $268.93    $266.96    0.26   x   0.53%
+2025-11-16   AAPL   BULLISH (BUY)          $266.96    $275.41    0.24   x   2.96%
 2025-11-23   AAPL   BULLISH (BUY)          $275.41    $282.58    0.23   x   2.40%
-2025-12-07   AAPL   BULLISH (BUY)          $277.37    $273.60    0.25   x  -1.56%
 2025-12-21   AAPL   BULLISH (BUY)          $270.47    $273.25    0.30   x   0.83%
 2025-12-28   AAPL   BULLISH (BUY)          $273.25    $266.76    0.34   x  -2.57%
 2026-01-04   AAPL   BEARISH (SHORT)        $266.76    $259.77    0.32   x   2.43%
 2026-02-15   AAPL   BULLISH (BUY)          $263.64    $271.89    0.18   x   2.92%
 2026-03-22   AAPL   BEARISH (SHORT)        $251.26    $246.40    0.24   x   1.74%
-2026-04-19   AAPL   BEARISH (SHORT)        $272.80    $267.36    0.22   x   1.80%
 2026-06-14   AAPL   BULLISH (BUY)          $296.42    $297.01    0.19   x  -0.00%
-2025-08-17   MSFT   BULLISH (BUY)          $513.00    $501.09    0.22   x  -2.52%
 2025-09-07   MSFT   BEARISH (SHORT)        $495.06    $509.71    0.34   x  -3.16%  [STOPPED OUT]
 2025-10-19   MSFT   BEARISH (SHORT)        $513.54    $530.09    0.31   x  -3.43%  [STOPPED OUT]
 2025-11-09   MSFT   BEARISH (SHORT)        $502.82    $504.30    0.24   x  -0.50%
 2025-11-16   MSFT   BEARISH (SHORT)        $504.30    $471.95    0.23   x   6.23%  [TARGET HIT]
+2025-12-21   MSFT   BULLISH (BUY)          $482.77    $484.94    0.29   x   0.25%
 2026-01-11   MSFT   BEARISH (SHORT)        $475.06    $455.62    0.37   x   3.90%  [TARGET HIT]
 2026-04-05   MSFT   BULLISH (BUY)          $372.07    $383.54    0.23   x   2.88%
-2025-08-10   GOOGL  BULLISH (BUY)          $200.43    $202.92    0.24   x   1.04%
 2025-11-09   GOOGL  BULLISH (BUY)          $289.53    $272.66    0.17   x  -6.02%  [STOPPED OUT]
 2025-11-30   GOOGL  BEARISH (SHORT)        $314.28    $313.31    0.13   x   0.11%
 2026-01-04   GOOGL  BULLISH (BUY)          $316.13    $331.43    0.26   x   4.63%
 2026-01-18   GOOGL  BULLISH (BUY)          $321.58    $334.12    0.21   x   3.69%
 =====================================================================================
-Total Trades Taken:  49
-Winning Trades:      29
-Win Rate:            59.2%
-Cumulative PnL:      4.20%
-Sharpe Ratio:        1.79
-Sortino Ratio:       2.83
-Max Drawdown:        -3.67%
-Benchmark (SPY B&H): 20.95%
-Alpha vs Benchmark:  -16.74%
+Total Trades Taken:  43
+Winning Trades:      25
+Win Rate:            58.1%
+Cumulative PnL:      3.65%
+Sharpe Ratio:        1.48
+Sortino Ratio:       1.95
+Max Drawdown:        -3.70%
+Benchmark (SPY B&H): 18.07%
+Alpha vs Benchmark:  -14.42%
 Equity curve saved to equity_curve.png
 ```
 
 ![Strategy equity curve vs SPY buy-and-hold benchmark](equity_curve.png)
 
-*Note: the backtest window is set to ~355 days — close to the maximum history Finnhub's free-tier company-news endpoint actually serves (empirically confirmed: requests further back than ~365 days return empty results). Widening the window from an earlier ~200-day version roughly tripled the trade count (from 18 to 49), giving a meaningfully more stable read on win rate and risk-adjusted metrics than a smaller sample allows. The signal threshold (`|momentum| > 0.01`) was set from this same window's empirical momentum distribution rather than a strictly disjoint train/validation split; a true holdout test (tuning on the first half of the window, evaluating on the second) showed the momentum score's typical magnitude is not stationary over time, so a fixed threshold tuned on one period can under- or over-fire on another — the same reason the risk engine uses a rolling ATR rather than a fixed-dollar stop, a refinement not yet applied to the sentiment threshold itself. Over this window the strategy underperformed SPY buy-and-hold (negative alpha), largely because SPY had an unusually strong ~21% run and a selective long/short strategy taking 49 total positions across 5 stocks was never structurally positioned to capture that much broad-market beta. The focus of this project is the engineering of the risk and evaluation pipeline itself (ATR-adaptive stops/targets, volatility-scaled position sizing, cost-adjusted PnL, daily portfolio-level mark-to-market accounting for overlapping positions, and honest benchmark-relative reporting), not a curve-fit claim of profitability.*
+A couple of things worth knowing about this result. The ~355-day window is close to the limit of what Finnhub's free-tier news endpoint actually returns — go back further than ~365 days and requests start coming back empty. An earlier version of the backtest also had a real bug: Finnhub read-timeouts were caught with a bare `except: pass`, so once the free tier started throttling repeated requests, a date that failed to fetch news looked identical in the output to a date with no news at all — no error, nothing. That was quietly dropping about two-thirds of the candidate dates. Fixing it (`api_utils.py` — longer timeout, retries with backoff, a floor delay between requests) roughly tripled the trade count and moved the Sharpe/Sortino numbers above noticeably, which is why they won't match figures from earlier commits — that older sample was incomplete without any indication of it.
+
+The momentum threshold (`|momentum| > 0.01`) is tuned on the same window it's tested on rather than a separate calibration split, and a rough holdout check showed the typical size of the momentum signal isn't stable over time — a threshold tuned on one period can misfire on another. That's still an open problem here, not a solved one. Over this window the strategy trailed SPY buy-and-hold, mostly because SPY had an unusually strong run and a long/short strategy taking 43 trades across 5 names was never going to capture that much of a broad market move. The point of this project isn't a profitability claim — it's the risk and evaluation machinery: ATR-based stops and sizing, cost-adjusted PnL, daily mark-to-market accounting for overlapping trades, and reporting results against a real benchmark instead of in isolation.

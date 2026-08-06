@@ -1,11 +1,11 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft import PeftModel
-import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
 import math
+from api_utils import fetch_json
 
 load_dotenv()
 
@@ -28,13 +28,7 @@ def get_historical_news(symbol, days=30):
     today = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from={start_date}&to={today}&token={FINNHUB_API}'
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except:
-        pass
-    return []
+    return fetch_json(url, symbol)
 
 def predict_positivity(text, model, tokenizer):
     inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=128).to(device)

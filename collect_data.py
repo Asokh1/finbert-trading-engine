@@ -1,8 +1,8 @@
 import os
-import requests
 import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
+from api_utils import fetch_json
 
 load_dotenv()
 
@@ -16,30 +16,19 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS news
-                 (id INTEGER PRIMARY KEY, symbol TEXT, headline TEXT, 
+                 (id INTEGER PRIMARY KEY, symbol TEXT, headline TEXT,
                   summary TEXT, source TEXT, date TEXT)''')
     conn.commit()
     conn.close()
 
 def get_finnhub_news(symbol):
     url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&limit=20&token={FINNHUB_API}'
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except:
-        pass
-    return []
+    return fetch_json(url, symbol)
 
 def get_newsapi_data(query):
     url = f'https://newsapi.org/v2/everything?q={query}&sortBy=publishedAt&language=en&pageSize=20&apiKey={NEWSAPI_KEY}'
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json().get('articles', [])
-    except:
-        pass
-    return []
+    result = fetch_json(url, f"query '{query}'")
+    return result.get('articles', []) if isinstance(result, dict) else []
 
 def save_to_db(symbol, headline, summary, source):
     conn = sqlite3.connect(DB_PATH)
