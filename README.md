@@ -25,6 +25,22 @@ Scores financial news headlines with a fine-tuned FinBERT model, turns that into
 - **Costs:** commission and slippage applied on both legs of every trade, so the PnL numbers are cost-adjusted rather than theoretical.
 - **Performance reporting:** the backtest marks the portfolio to market daily — each trade's return spread across the days it was held, overlapping trades summed instead of treated as sequential — then reports Sharpe, Sortino, and max drawdown off that daily equity curve (252-day annualization), benchmarked against SPY buy-and-hold for alpha.
 
+## Live forward-testing
+
+Backtests are always vulnerable to the accusation that they're curve-fit in hindsight. `live_forward_test.py` runs the same sentiment-momentum signal as `backtest.py`, but on live data as of today, and — critically — records a prediction (entry price, ATR-based stop/target, position size, a real wall-clock timestamp) *before* the outcome is known, into `data/forward_test.db`. Every run also grades all currently-open predictions against fresh price data and closes any that have hit their stop, hit their target, or aged past the holding-period cap. It then reports win rate, cumulative return, and Sharpe/Sortino/drawdown purely off that closed-prediction log — a real, growing track record, separate from and comparable to the backtest numbers above.
+
+It's designed to run once a day (Task Scheduler / cron) without double-counting: a symbol with an open prediction is skipped rather than re-signaled, and closed predictions are never reopened. `data/forward_test.db` is committed to the repo (not gitignored) and updated periodically as real history accumulates, so the commit history itself is part of the evidence.
+
+## Alpha attribution: is sentiment adding anything?
+
+The obvious question for a reader of this README: is the sentiment signal actually adding anything, or is this just price momentum in disguise? `ablation_study.py` runs the identical trade-simulation machinery (ATR stops, position sizing, cost-adjusted returns, daily mark-to-market accounting) across three signal sources on the same tickers and window:
+
+1. the sentiment-momentum signal above, unchanged;
+2. a pure price-momentum control — the same MACD-style short/long half-life decay, applied to the stock's own daily returns instead of sentiment;
+3. a placebo — the real sentiment scores, with the article-to-date mapping shuffled (fixed seed) before folding into the momentum calc, destroying any genuine predictive relationship while preserving the score distribution and roughly the trade frequency.
+
+Because price returns and shuffled sentiment scores live on a totally different numeric scale than the sentiment MACD, each control arm's threshold is calibrated separately — a quantile cutoff against that arm's own realized momentum distribution over the test window, chosen to match the sentiment arm's empirical trade rate, rather than reusing one literal cutoff value across arms. Worth being upfront about: calibrating from the full-window distribution is itself a mild form of look-ahead — it uses the whole test period to decide where to draw the line. It's scoped narrowly (it only affects the two control arms' thresholds, not any individual trade's entry/exit logic, and doesn't touch the sentiment arm's original hand-tuned threshold) but it's a real simplification, not a hidden one.
+
 ## Model training and evaluation
 
 `train_finbert.py` fine-tunes the FinBERT head with LoRA on an 80/20 split and reports accuracy, macro-F1, per-class F1, and a confusion matrix each epoch instead of just tracking loss, and picks the best checkpoint by macro-F1. A recent run:
@@ -49,6 +65,7 @@ One caveat worth flagging: this eval runs on held-out **Twitter** financial-sent
 3. Turn the sentiment series into a momentum signal and threshold it into bullish/bearish/neutral.
 4. Simulate entries and exits against the ATR stop/target logic, tracking size and cost.
 5. Roll trade-level returns into a daily equity curve and compute Sharpe/Sortino/drawdown against SPY.
+6. Separately, `live_forward_test.py` runs the same signal on live data and persists timestamped predictions for later grading, while `ablation_study.py` re-runs the same trade machinery against price-momentum and shuffled-sentiment controls to check whether the sentiment signal is adding real value.
 
 ## Setup
 
@@ -164,6 +181,18 @@ Equity curve saved to equity_curve.png
 ```
 
 ![Strategy equity curve vs SPY buy-and-hold benchmark](equity_curve.png)
+
+### Live forward-testing
+```bash
+python live_forward_test.py
+```
+Checks for new signals on live data, records any as timestamped predictions, grades open predictions against fresh prices, and reports the cumulative realized track record.
+
+### Alpha attribution ablation
+```bash
+python ablation_study.py
+```
+Runs sentiment-momentum, price-momentum, and shuffled-sentiment placebo through the identical trade simulation, prints a comparison table, and saves `ablation_equity_curve.png`.
 
 A couple of things worth knowing about this result. The ~355-day window is close to the limit of what Finnhub's free-tier news endpoint actually returns — go back further than ~365 days and requests start coming back empty. An earlier version of the backtest also had a real bug: Finnhub read-timeouts were caught with a bare `except: pass`, so once the free tier started throttling repeated requests, a date that failed to fetch news looked identical in the output to a date with no news at all — no error, nothing. That was quietly dropping about two-thirds of the candidate dates. Fixing it (`api_utils.py` — longer timeout, retries with backoff, a floor delay between requests) roughly tripled the trade count and moved the Sharpe/Sortino numbers above noticeably, which is why they won't match figures from earlier commits — that older sample was incomplete without any indication of it.
 

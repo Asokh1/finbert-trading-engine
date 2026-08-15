@@ -1,28 +1,15 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from peft import PeftModel
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
 from api_utils import fetch_json
+from signal_engine import load_model, device
 
 load_dotenv()
 
-MODEL_DIR = 'models/finbert_renewable'
-BASE_MODEL = 'ProsusAI/finbert'
 FINNHUB_API = os.getenv('FINNHUB_API_KEY')
 
 STOCKS = ['MU']
-
-device = torch.device('cpu')
-
-def load_model():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=3)
-    model = PeftModel.from_pretrained(model, MODEL_DIR)
-    model = model.to(device)
-    model.eval()
-    return model, tokenizer
 
 def get_stock_news(symbol):
     # Look back 7 days for recent news

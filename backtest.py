@@ -1,184 +1,48 @@
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from peft import PeftModel
 from datetime import datetime, timedelta
 import yfinance as yf
-from dotenv import load_dotenv
-import os
-import math
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from api_utils import fetch_json
 
-load_dotenv()
-
-MODEL_DIR = 'models/finbert_renewable'
-BASE_MODEL = 'ProsusAI/finbert'
-FINNHUB_API = os.getenv('FINNHUB_API_KEY')
+from signal_engine import (
+    load_model, score_articles, sample_articles, fetch_finnhub_news,
+    calculate_historical_score, calculate_atr,
+)
+from trade_engine import simulate_trade, compute_performance_metrics, fetch_benchmark_equity, plot_equity_curve
 
 STOCKS = ['AMZN', 'TSLA', 'AAPL', 'MSFT', 'GOOGL']
-device = torch.device('cpu')
 
-def fetch_finnhub_news(symbol, from_date, to_date):
-    url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from={from_date}&to={to_date}&token={FINNHUB_API}'
-    return fetch_json(url, f"{symbol} on {to_date}")
+ATR_MULTIPLIER = 2 # stop = 2x ATR
+TAKE_PROFIT_MULTIPLIER = 3 # target = 3x ATR, so we're risking 1 to make 1.5
+TRANSACTION_COST_PCT = 0.001 # ~10bps per leg for commission/slippage
+RISK_PER_TRADE_PCT = 0.01 # risk about 1% of capital per trade
+MAX_POSITION_WEIGHT = 3.0 # cap so a super tight stop doesn't over-leverage us
+HOLDING_PERIOD_DAYS = 7
 
-def load_model():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=3)
-    model = PeftModel.from_pretrained(model, MODEL_DIR)
-    model = model.to(device)
-    model.eval()
-    return model, tokenizer
-
-def predict_positivity(text, model, tokenizer):
-    inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=128).to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    probs = torch.softmax(outputs.logits, dim=1)[0].cpu().numpy()
-    # FinBERT id2label: 0=positive, 1=negative, 2=neutral. Split neutral mass evenly so
-    # a neutral headline pulls the score toward 0.5 instead of being ignored outright.
-    return float(probs[0] + 0.5 * probs[2])
-
-def score_articles(articles, model, tokenizer):
-    return [predict_positivity(article.get('headline', ''), model, tokenizer) for article in articles]
-
-def calculate_historical_score(articles, positivities, target_date, half_life_days):
-    total_weight = 0
-    weighted_sentiment = 0
-
-    for article, positivity in zip(articles, positivities):
-        timestamp = article.get('datetime', 0)
-        article_date = datetime.fromtimestamp(timestamp)
-
-        # Only look at articles BEFORE our target date
-        if article_date >= target_date:
-            continue
-
-        days_ago = (target_date - article_date).days
-        # Only look at the 30 days leading up to the target date
-        if days_ago > 30 or days_ago < 0:
-            continue
-
-        weight = math.pow(0.5, days_ago / half_life_days)
-
-        weighted_sentiment += positivity * weight
-        total_weight += weight
-
-    if total_weight == 0:
-        return 0.5
-    return weighted_sentiment / total_weight
-
-def calculate_atr(df, period=14):
-    high = df['High']
-    low = df['Low']
-    prev_close = df['Close'].shift(1)
-
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
-
-    return tr.rolling(window=period).mean()
-
-def calculate_trade_return(price_in, price_out, is_bullish, cost_pct):
-    # cost_pct hits us going in and coming out, roughly commission + slippage
-    if is_bullish:
-        effective_in = price_in * (1 + cost_pct)
-        effective_out = price_out * (1 - cost_pct)
-        return (effective_out - effective_in) / effective_in
-    else: # Bearish / Shorting
-        effective_in = price_in * (1 - cost_pct)
-        effective_out = price_out * (1 + cost_pct)
-        return (effective_in - effective_out) / effective_in
-
-def compute_performance_metrics(trade_records, start_date, end_date):
-    # daily, portfolio-level mark-to-market: trades held over the same days must
-    # add up on those days, not queue up one-after-another regardless of overlap.
-    # each trade's total weighted_return is spread evenly across the business days
-    # it was actually open, then every trade open on a given day contributes to
-    # that day's portfolio return.
-    calendar = pd.bdate_range(start=start_date, end=end_date)
-    daily_returns = pd.Series(0.0, index=calendar)
-
-    for t in trade_records:
-        held_days = calendar[(calendar > t['entry_date']) & (calendar <= t['exit_date'])]
-        if len(held_days) == 0:
-            continue
-        daily_returns.loc[held_days] += t['weighted_return'] / len(held_days)
-
-    equity_curve = (1 + daily_returns).cumprod()
-    running_peak = equity_curve.cummax()
-    max_drawdown = ((equity_curve - running_peak) / running_peak).min()
-
-    mean_return = daily_returns.mean()
-    std_return = daily_returns.std(ddof=0)
-    TRADING_DAYS_PER_YEAR = 252
-    sharpe = (mean_return / std_return) * math.sqrt(TRADING_DAYS_PER_YEAR) if std_return > 0 else 0.0
-
-    downside_returns = daily_returns[daily_returns < 0]
-    downside_std = downside_returns.std(ddof=0) if len(downside_returns) > 1 else 0.0
-    sortino = (mean_return / downside_std) * math.sqrt(TRADING_DAYS_PER_YEAR) if downside_std > 0 else 0.0
-
-    return {
-        'dates': equity_curve.index,
-        'equity_curve': equity_curve.values,
-        'sharpe': sharpe,
-        'sortino': sortino,
-        'max_drawdown': max_drawdown,
-        'total_return': equity_curve.iloc[-1] - 1.0,
-    }
+# Threshold picked from the empirical momentum distribution (std ~0.007 under the
+# 3-class model) to land near the ~11% signal rate the strategy was tuned around,
+# rather than the old 0.02 cutoff which only caught ~2%.
+MOMENTUM_BULLISH_THRESHOLD = 0.01
+MOMENTUM_BEARISH_THRESHOLD = -0.01
 
 
-def fetch_benchmark_equity(start_date, end_date, symbol='SPY'):
-    benchmark = yf.Ticker(symbol).history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-    if benchmark.empty:
-        return None, None
-    benchmark.index = benchmark.index.tz_localize(None)
-    equity = benchmark['Close'] / benchmark['Close'].iloc[0]
-    return benchmark.index, equity
-
-
-def plot_equity_curve(portfolio_dates, portfolio_equity, benchmark_dates, benchmark_equity, benchmark_symbol, output_path='equity_curve.png'):
-    plt.figure(figsize=(10, 6))
-    plt.plot(portfolio_dates, portfolio_equity, label='Strategy', linewidth=2)
-    if benchmark_equity is not None:
-        plt.plot(benchmark_dates, benchmark_equity, label=f'{benchmark_symbol} Buy & Hold', linewidth=1.5, alpha=0.8)
-    plt.axhline(1.0, color='gray', linestyle='--', linewidth=0.8)
-    plt.title('Strategy Equity Curve vs Benchmark')
-    plt.xlabel('Date')
-    plt.ylabel('Growth of $1')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-    print(f"Equity curve saved to {output_path}")
-
-
-def run_backtest():
-    print("Initializing Backtester with Dynamic ATR Stop-Loss...")
-    model, tokenizer = load_model()
-    
+def get_test_window():
     # Finnhub's free tier only serves company news for roughly the trailing year, so
     # 355 days is close to the max history we can pull without silently getting empty
     # results near the boundary.
     end_date = datetime.now() - timedelta(days=10)
     start_date = end_date - timedelta(days=355)
-    
-    # Generate weekly test dates
     test_dates = pd.date_range(start=start_date, end=end_date, freq='W')
-    
+    return start_date, end_date, test_dates
+
+
+def run_backtest():
+    print("Initializing Backtester with Dynamic ATR Stop-Loss...")
+    model, tokenizer = load_model()
+
+    start_date, end_date, test_dates = get_test_window()
+
     total_trades = 0
     winning_trades = 0
     trade_records = []
-    ATR_MULTIPLIER = 2 # stop = 2x ATR
-    TAKE_PROFIT_MULTIPLIER = 3 # target = 3x ATR, so we're risking 1 to make 1.5
-    TRANSACTION_COST_PCT = 0.001 # ~10bps per leg for commission/slippage
-    RISK_PER_TRADE_PCT = 0.01 # risk about 1% of capital per trade
-    MAX_POSITION_WEIGHT = 3.0 # cap so a super tight stop doesn't over-leverage us
 
     print(f"\n{'DATE':<12} {'SYM':<6} {'SIGNAL':<22} {'PRICE IN':<10} {'PRICE OUT':<10} {'SIZE':<8} {'RETURN'}")
     print("=" * 85)
@@ -201,13 +65,11 @@ def run_backtest():
             to_date = target_date.strftime('%Y-%m-%d')
             from_date = (target_date - timedelta(days=30)).strftime('%Y-%m-%d')
             news = fetch_finnhub_news(symbol, from_date, to_date)
-                
+
             if not news:
                 continue
-                
-            # Sample evenly to prevent AI from only reading a single day's news
-            step = max(1, len(news) // 40)
-            sampled_news = news[::step][:40]
+
+            sampled_news = sample_articles(news, max_count=40)
 
             # score each article once and reuse it below, instead of scoring it twice
             sampled_positivity = score_articles(sampled_news, model, tokenizer)
@@ -216,107 +78,38 @@ def run_backtest():
             short_term = calculate_historical_score(sampled_news, sampled_positivity, target_date, 3)
             long_term = calculate_historical_score(sampled_news, sampled_positivity, target_date, 14)
             momentum = short_term - long_term
-            
+
             # 4. Define our Signal Strategy
-            # Threshold picked from the empirical momentum distribution (std ~0.007
-            # under the 3-class model) to land near the ~11% signal rate the strategy
-            # was tuned around, rather than the old 0.02 cutoff which only caught ~2%.
-            is_bullish = momentum > 0.01
-            is_bearish = momentum < -0.01
-            
+            is_bullish = momentum > MOMENTUM_BULLISH_THRESHOLD
+            is_bearish = momentum < MOMENTUM_BEARISH_THRESHOLD
+
             if not is_bullish and not is_bearish:
                 continue # Skip if no strong signal
-                
+
             signal_text = "BULLISH (BUY)" if is_bullish else "BEARISH (SHORT)"
-            
+
             try:
-                # Find entry day
-                price_in_idx = stock_data.index.get_indexer([target_date], method='nearest')[0]
-                actual_entry_date = stock_data.index[price_in_idx]
-                price_in = float(stock_data['Close'].iloc[price_in_idx])
-
-                current_atr = stock_data['ATR'].iloc[price_in_idx]
-                if pd.isna(current_atr):
-                    continue # not enough history yet for a 14-day ATR
-
-                # stop and target are both set once at entry, based on that day's ATR
-                if is_bullish:
-                    stop_loss_price = price_in - (ATR_MULTIPLIER * current_atr)
-                    take_profit_price = price_in + (TAKE_PROFIT_MULTIPLIER * current_atr)
-                else: # shorting - stop sits above entry, target sits below
-                    stop_loss_price = price_in + (ATR_MULTIPLIER * current_atr)
-                    take_profit_price = price_in - (TAKE_PROFIT_MULTIPLIER * current_atr)
-
-                # wider stop = smaller size, so every trade risks about the same amount
-                stop_distance_pct = (ATR_MULTIPLIER * current_atr) / price_in
-                position_weight = min(RISK_PER_TRADE_PCT / stop_distance_pct, MAX_POSITION_WEIGHT)
-
-                # Get the next 7 days of price data
-                window_end_date = actual_entry_date + timedelta(days=7)
-                holding_period_data = stock_data.loc[actual_entry_date + timedelta(days=1) : window_end_date]
-
-                trade_return = 0.0
-                price_out = price_in
-                stopped_out = False
-                hit_target = False
-                trade_exit_date = actual_entry_date
-
-                # Check price day by day
-                for current_date, row in holding_period_data.iterrows():
-                    # stop-loss first, in case a gap day blows through both levels
-                    if is_bullish and row['Low'] < stop_loss_price:
-                        price_out = stop_loss_price
-                        trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
-                        stopped_out = True
-                        trade_exit_date = current_date
-                        break # Exit the trade instantly!
-                    elif is_bearish and row['High'] > stop_loss_price:
-                        price_out = stop_loss_price
-                        trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
-                        stopped_out = True
-                        trade_exit_date = current_date
-                        break # Exit the trade instantly!
-
-                    # then check if we hit the target
-                    if is_bullish and row['High'] > take_profit_price:
-                        price_out = take_profit_price
-                        trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
-                        hit_target = True
-                        trade_exit_date = current_date
-                        break
-                    elif is_bearish and row['Low'] < take_profit_price:
-                        price_out = take_profit_price
-                        trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
-                        hit_target = True
-                        trade_exit_date = current_date
-                        break
-
-                # survived the week without hitting either level, close normally
-                if not stopped_out and not hit_target and not holding_period_data.empty:
-                    price_out = float(holding_period_data.iloc[-1]['Close'])
-                    trade_return = calculate_trade_return(price_in, price_out, is_bullish, TRANSACTION_COST_PCT)
-                    trade_exit_date = holding_period_data.index[-1]
+                trade = simulate_trade(
+                    stock_data, target_date, is_bullish, is_bearish,
+                    ATR_MULTIPLIER, TAKE_PROFIT_MULTIPLIER, TRANSACTION_COST_PCT,
+                    RISK_PER_TRADE_PCT, MAX_POSITION_WEIGHT, HOLDING_PERIOD_DAYS,
+                )
+                if trade is None:
+                    continue
 
                 total_trades += 1
-                if trade_return > 0:
+                if trade['trade_return'] > 0:
                     winning_trades += 1
 
-                trade_records.append({
-                    'entry_date': actual_entry_date,
-                    'exit_date': trade_exit_date,
-                    'symbol': symbol,
-                    'weighted_return': trade_return * position_weight,
-                })
+                trade['symbol'] = symbol
+                trade_records.append(trade)
 
                 # marker so we know how it closed
-                if stopped_out:
-                    status_marker = "[STOPPED OUT]"
-                elif hit_target:
-                    status_marker = "[TARGET HIT]"
-                else:
-                    status_marker = ""
-                print(f"{target_date.strftime('%Y-%m-%d'):<12} {symbol:<6} {signal_text:<22} ${price_in:<9.2f} ${price_out:<9.2f} {position_weight:<7.2f}x {trade_return*100:>6.2f}%  {status_marker}")
-                
+                status_marker = {'stop': '[STOPPED OUT]', 'target': '[TARGET HIT]', 'time': ''}[trade['exit_reason']]
+                print(f"{target_date.strftime('%Y-%m-%d'):<12} {symbol:<6} {signal_text:<22} "
+                      f"${trade['price_in']:<9.2f} ${trade['price_out']:<9.2f} {trade['position_weight']:<7.2f}x "
+                      f"{trade['trade_return']*100:>6.2f}%  {status_marker}")
+
             except Exception as e:
                 print(f"Skipping {symbol} on {target_date.strftime('%Y-%m-%d')}: {e}")
 
@@ -338,7 +131,10 @@ def run_backtest():
             print(f"Benchmark (SPY B&H): {benchmark_return*100:.2f}%")
             print(f"Alpha vs Benchmark:  {(metrics['total_return'] - benchmark_return)*100:.2f}%")
 
-        plot_equity_curve(metrics['dates'], metrics['equity_curve'], benchmark_dates, benchmark_equity, 'SPY')
+        curves = [{'label': 'Strategy', 'dates': metrics['dates'], 'equity': metrics['equity_curve'], 'style': {'linewidth': 2}}]
+        if benchmark_equity is not None:
+            curves.append({'label': 'SPY Buy & Hold', 'dates': benchmark_dates, 'equity': benchmark_equity, 'style': {'linewidth': 1.5, 'alpha': 0.8}})
+        plot_equity_curve(curves)
 
 if __name__ == '__main__':
     run_backtest()
